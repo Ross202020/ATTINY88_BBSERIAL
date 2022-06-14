@@ -1,2 +1,531 @@
 # ATTINY88_BBSERIAL
 ATTINY BIT BANG SERIAL
+SIGNAL LAMP DRIVER – ATTINY88 App 1.7
+
+The Signal Lamp has 3 Lamps. To minimize wiring harness a simple ATTINY88 Lamp Slave application will drive each Lamp with 3 (colour) digital outputs. Colour Selected by a single Master Computer – NANO or UNO located externally or in one of the 3 Lamps. The Master communicates with the Lamp Slaves via Half Duplex Bit Bang Serial on Pin 3 – a One Wire Network – referenced to GND
+
+OVERVIEW:
+Each Lamp Slave has an Address: 0=Top, 1=Middle, 2=Bottom. Lamp Address is read from Pins 5(==1), 6(==2) where an Input of 1 = '1'. So if Both Address Lines are held Low, this will be the TOP Lamp.
+Communications on Pin 3. Master initiates all Communication Transactions on One Wire Network
+Pin 4 is driven LOW to connect to Address Pins to affect a '0'
+Pin 7 is driven HIGH to connect to Address Pins for '1' – Also Reference voltage for external Comparator
+Lamp Colour Outputs are:  8 == RED,  9== GRN,  10 ==YLW driven through external comparator
+Flashing Option toggles Lamp at 500 ms rate
+
+COMMUNICATIONS:
+Communications Pin (3) is set as INPUT_PULLUP while waiting to Receive, and is only set to OUTPUT to send a message, restoring to INPUT as soon a message has been sent.
+Bits are LOW ACTIVE with a 4 ms Bit Time Frame 
+Each BYTE Begins with Low Active START_BIT followed by 7 Data Bits (7-Bit Text) and ending with High STOP_BIT 
+Next Byte of a Message begins within 10 ms of end of previous byte. End of Message is detected if no new START is sensed within 10 ms.
+
+SIGNAL  LAMP  PROTOCOL:
+Signal Lamp Colour Commands begin with '$' followed by 3 colour fields for Top,Middle, Bottom Lamp in comma delimited fields.  
+Example    $R,GF,Y           ;This sets TOP=RED, Middle=GRN-FLASHING, and Bottom=YLW
+Each Lamp utilizes color selected by its Address (0, 1, 2 = Bottom)
+No Reply to '$'  Signal Command
+Master can Query Status of any single Lamp (0,1,2) with Msg    @1
+Reply to Lamp Query  >#1GF         ;This example shows Lamp 1 is displaying GRN-FLASH
+
+DIRECT IO ACCESS PROTOCOL:
+IO Control Commands begin with '!'  3 Command options: GET, SET, CLR for all digital IO
+Examples:  !G5      ;Get current value of Digital input 5.       !S5       ;Set Digital Output 5 = 1
+                   !C12          ;Clear Digital Output 12 (Set=0)       !G52      ;Get Analog Input[2] value(0-1023)
+                   !GET10     ;Get Dig Input Value for [10]            !SET9      ;Set Dig[9] = 1
+                   !CLR9       ;Clear Dig[9]  (Set=0)
+Accommodation included for Analog Inputs AI0 – AI7 by adding 50 to input number. However, Analog Input values do not appear to work correctly
+Reply indicates value for GET, SET, CLR.  Examples Cmd>!G9    Reply>[9]=1
+    !SET7      Reply>[7]=1                 !C7      Reply>[7]=0
+
+CONNECTIONS:
+VIN is from Power Supply (5.5 VDC),   GND = GND,  Pin(3) is communication Pin – use 220 Ohm at each station on the One Wire Network to limit the drive current on network with multiple nodes.
+/*************************************************************************************************************
+ *  ATTINY_TEST       
+ *    To make this work:
+ *      1) File > Preferences > Additional Board Manager URLs
+ *          https://raw.githubusercontent.com/MHEtLive/arduino-boards-index/master/package_mhetlive_index.json
+ *      2) Tools > Board > Board Manager    Search for “tiny88”, install board manager files. MH-ET LIVE Tiny88
+ *      3) To upload your program, 
+ *         A) start the upload process with board UNPLUGGED
+ *         B) watch lower pane on IDE and wait for Prompt >>> Plug in device now... (will timeout in 60 seconds) 
+ *         C) Plug device in    -Note must have installed Digitstump "Attiny driver package"
+ *               https://www.universal-solder.ca/downloads/Attiny%20driver%20package.zip
+ *               
+ *  NOTE: The PORT will NOT be visible in Tools  ->There is no Serial Monitor option
+ *               
+ *  THIS WORKS !! ...use of millis(), clockTick and softTimers seems to work OK
+ *      >>Replies correctly to Arduino UNO BIT BANG SERIAL Master
+ *      >>Parses Numeric Data correctly too !!
+ * Rev 1.2  8JUNNE22  -WORKING ->Perofrms DIgital GET,SET OK but Analog Read Values doe not seem to change much
+ *      -But for the initial application that drives Signal IO, This is OK
+ * 1.5  -Added SIGNAL LAMP MODE ->Tested OK.  Commands Format >$RF,GF,YF     
+ *          Message begins with '$' then Lamp [0] Colour, Lamp[1] Clr, Lamp[2]
+ *          Colours: {R,G,Y,RF,GF,YF}   Lamp Address is read from Pins 5,6
+ * 1.6  -Added HI & LO Outputs for Address inputs + Comparator Reference voltage source
+ *      -Moved Lamp Outputs to 10,11,12
+ *      -Direct IO Read (GET) of Analog Inputs does NOT Work
+ * 1.7  -Finished ! -Output Pins set to 8,9,10  -Added Query Reply, Rmvd Reply to Lamp Cmd
+ * 1.72 -Added TEST Command to test itoa()  -->Tested OK !
+ *************************************************************************************************************/
+#define TITLE                   "TINY_BBSER(1.73)" 
+#define FIRST_DIG_IO            0
+#define LAST_DIG_IO             16
+#define ONBOARD_STSLED_PIN      0
+#define NUM_AI                  8
+
+#define COMM_PIN                3
+#define COMMBFR_SIZ             24
+#define BIT_FRAME_TIME          4
+#define NXT_BYTE_TIMEOUT        10    // ms to wait for nxt byte START_BIT
+
+#define LAMP_UPDATE_RATE        500   // ms 
+#define NUM_LAMPS               3
+#define LAMP_RED                1
+#define LAMP_GRN                2
+#define LAMP_YLW                4
+#define LAMP_FLASH              8
+#define TOP_LAMP                0
+#define MID_LAMP                1
+#define BTM_LAMP                2
+
+#define LO_REF_PIN              4       // provide convenient GND Ref to Address Pins next door
+#define HI_REF_PIN              7       // provide HIGH Reference output to Address Pins and to Comparator for Lamp Outputs
+
+#define LAMP_ADDR_PIN1          5       // Lamp Address Inputs
+#define LAMP_ADDR_PIN2          6
+
+#define LAMP_RED_PIN            8       // Lamp Colour Outputs
+#define LAMP_GRN_PIN            9
+#define LAMP_YLW_PIN            10
+
+#define LAMP_CMD_PREFIX         '$'
+#define LAMP_QUERY_PREFIX       '@'
+#define IO_CMD_PREFIX           '!'
+#define TEST_REQUEST_PREFIX     'T'
+#define SET_CMD                 1
+#define CLR_CMD                 2
+#define GET_CMD                 3
+#define ANALOG_INPUT_OFFSET     50    // AO[0]=50, AO[1]=51, ...
+ 
+#define CMD_SUCCESS_FLAG        0x01
+#define FLASH_FLAG              0x02
+#define ANALOG_RD_FLAG          0x04
+#define SIGNAL_CMDMODE_FLAG     0x10
+#define ADDR_ANNOUNCED_FLAG     0x20
+
+byte  commState, bitTime, nxtSample, bitMask, bitCnt, ioRefCh[2],
+      clkSec, 
+      newCh, commBfrLen, commNdx, commBfr[COMMBFR_SIZ+1], bytV, xx,
+      lampClr, myLampAddr, cmdCode, ioRef, flags;  
+unsigned long sysTick;
+unsigned clkms, softET;
+int intVal;
+
+void setFlag(byte flagV) { flags |= flagV; } 
+void clrFlag(byte flagV) { flags &= ~flagV; } 
+inline byte tstFlag(byte flagV) { return (flags & flagV); } 
+/*********************************************************************
+ * 
+ *********************************************************************/
+void setup() 
+{
+  pinMode(ONBOARD_STSLED_PIN, OUTPUT);
+  pinMode(LO_REF_PIN, OUTPUT);  digitalWrite(LO_REF_PIN, LOW);
+  pinMode(HI_REF_PIN, OUTPUT);  digitalWrite(HI_REF_PIN, HIGH);
+  flags = 0; 
+      ///// ANNOUNCE REBOOT WITH TITLE AND REV
+  char *tptr = TITLE; byte cx=0;  commBfrLen=0;
+  while(tptr[cx]>' ' && commBfrLen<COMMBFR_SIZ) 
+  { commBfr[commBfrLen++] = tptr[cx++];
+  } 
+  commBfr[commBfrLen++] = ' '; 
+  commBfr[commBfrLen++] = '#'; 
+  myLampAddr = getLampAddr();     // Fetch Address from Jumpers on Pins 5,6  
+  commBfr[commBfrLen++] = '0' + myLampAddr; 
+  commBfr[commBfrLen] = 0;
+  commState = 100;
+  myLampAddr = 0;
+}
+
+/*********************************************************************
+ * 
+ *********************************************************************/
+void loop() 
+{ 
+  if(sysTick != millis())     // NEW ms 
+  {     
+    sysTick = millis();
+    if(++clkms >= 1000)       // Manage Time ->every 1000 ms == New Second
+    {
+      clkms = 0;
+      if(++clkSec>=60) clkSec = 0;
+      digitalWrite(ONBOARD_STSLED_PIN, clkSec & 1);      // Toggle Heartbeat every second
+    }
+    softET++;     // INCR ET every ms - gets reset when used
+    
+        // DO SERIAL COMM TASKS EVERY ms
+    ++bitTime;                // INCR bitTime every ms    
+    switch(commState)
+    {
+      case 0:                 // INIT RCV_MODE
+        pinMode(COMM_PIN, INPUT_PULLUP);
+        commState = 1;
+        break;
+
+      case 1:                 // WAITING FOR START OF NEW MSG ->START BIT of FIRST BYTE 
+        if(!digitalRead(COMM_PIN))              // LOW ACTV ->START BIT RCVD
+        {
+          bitMask = 0x40;   newCh = 0;  bitCnt = 1;
+          bitTime = 0;    nxtSample = BIT_FRAME_TIME + BIT_FRAME_TIME/2;  // Set for middle of Next Frame 
+          commNdx = 0;                        // Reset msg bfr index
+          commState = 3;                      
+        }
+        else                        //// IDLE
+        {
+          if(commBfrLen && bitTime > 5)      // REPLY MSG Ready To SEND ->Initiate Sendnow
+          {
+            commState = 100;                  
+          }
+          else      // IDLE   
+          { 
+            if(!tstFlag(ADDR_ANNOUNCED_FLAG))
+            {
+              myLampAddr = getLampAddr();     // Fetch Address from Jumpers on Pins 5,6
+              if(bitTime > (10 + (myLampAddr * 50)))
+              {              
+                setFlag(ADDR_ANNOUNCED_FLAG);
+                commBfrLen = 0;
+                commBfr[commBfrLen++] = '#';
+                commBfr[commBfrLen++] = '0' + myLampAddr;
+                commBfr[commBfrLen] = 0;        
+                commState = 100;                  // Begin Send 
+              }
+            }
+            else if(tstFlag(SIGNAL_CMDMODE_FLAG))      // Are driving Signal Outputs, NOT Direct IO
+            {
+              if(softET >= LAMP_UPDATE_RATE)      // 500 ms ET since last update
+              {
+                softET = 0;                       // CLR ET
+                byte r=0,g=0,y=0;
+                if(lampClr & LAMP_GRN)  ++g;
+                else if(lampClr & LAMP_YLW)  ++y;
+                else ++r;
+                  // IF FLASHING LAMP THEN only allow Actv output every 2nd pass
+                if(lampClr & LAMP_FLASH)
+                {
+                  if(tstFlag(FLASH_FLAG)) 
+                  {
+                    r = g = y = 0;
+                    clrFlag(FLASH_FLAG);
+                  }
+                  else 
+                    setFlag(FLASH_FLAG);   
+                }
+                pinMode(LAMP_RED_PIN, OUTPUT);    digitalWrite(LAMP_RED_PIN, r);
+                pinMode(LAMP_GRN_PIN, OUTPUT);    digitalWrite(LAMP_GRN_PIN, g);
+                pinMode(LAMP_YLW_PIN, OUTPUT);    digitalWrite(LAMP_YLW_PIN, y);
+              }
+            } // end  if(tstFlag(SIGNAL_CMDMODE_FLAG))
+          }
+        }
+        break;
+        
+      case 2:                 // WAITING FOR START OF NEXT BYTE IN THIS MSG 
+        if(!digitalRead(COMM_PIN))              // LOW ACTV ->START BIT RCVD
+        {
+          bitMask = 0x40;   newCh = 0;  
+          bitCnt = 1;
+          ++commState;                      
+          bitTime = 0;    nxtSample = BIT_FRAME_TIME + BIT_FRAME_TIME/2;  // Set for middle of Next Frame  
+        }
+        else if(commNdx)                // NO START RCVD for Next Byte ->Check for TIMEOUT
+        {                                     //   if commNdx then have rcvd some msg bytes
+          if(bitTime >= nxtSample)            // TIMEOUT:  so this is END OF MSG
+          {       ////  Process Rcvd Msg then Reset
+            cmdCode = ioRef = 0;              // Init Parse Vars
+            clrFlag(CMD_SUCCESS_FLAG);        // Clear Flags
+            clrFlag(ANALOG_RD_FLAG);
+            commBfrLen = 0;
+            
+                  //////////////////////////////////////////////////////
+                  //  PROCESS SIGNAL LAMP CMD
+                  //////////////////////////////////////////////////////
+            if(commBfr[0]==LAMP_CMD_PREFIX)
+            {
+              setFlag(SIGNAL_CMDMODE_FLAG);
+              myLampAddr = getLampAddr();     // Fetch Address from Jumpers on Pins 5,6
+                  // MOV TO INDEXED FLD
+              for(bytV=0,xx=1; bytV<myLampAddr && xx<commNdx ;xx++)
+              {
+                if(commBfr[xx]==',') ++bytV;
+              }
+                  // xx should be index into commBfr[] at start of clr fld for this address (0,1,2)
+              lampClr = 0;
+              if(commBfr[xx]=='R') lampClr = LAMP_RED;
+              else if(commBfr[xx]=='G') lampClr = LAMP_GRN;
+              else if(commBfr[xx]=='Y') lampClr = LAMP_YLW;
+              for(++xx ;xx<commNdx ;xx++)     // TEST FOR 'F' == FLASHING
+              {
+                if(commBfr[xx]==',') break;
+                if(commBfr[xx]=='F') 
+                {
+                  lampClr |= LAMP_FLASH;
+                  break;
+                }
+              }
+              setFlag(CMD_SUCCESS_FLAG);
+            }  //  end  else if(commBfr[0]==LAMP_CMD_PREFIX)
+                  //////////////////////////////////////////////////////
+                  //  PROCESS SIGNAL LAMP STATUS QUERY
+                  //////////////////////////////////////////////////////
+            else if(commBfr[0]==LAMP_QUERY_PREFIX)
+            {
+              myLampAddr = getLampAddr();     // Fetch Address from Jumpers on Pins 5,6
+              if(isDigit(commBfr[1]))
+                ioRef = commBfr[1] - '0';     // Convert Query Lamp Address
+              else
+                ioRef = 99;
+
+              if(ioRef==myLampAddr)
+              {
+                commBfrLen=2;
+                if(lampClr & LAMP_GRN)
+                  commBfr[commBfrLen++] = 'G';
+                else if(lampClr & LAMP_YLW)
+                  commBfr[commBfrLen++] = 'Y';  
+                else
+                  commBfr[commBfrLen++] = 'R';
+                if(lampClr & LAMP_FLASH)
+                  commBfr[commBfrLen++] = 'F';              
+                commBfr[commBfrLen] = 0;          // Terminate Msg            
+                commState = 100;                  // Begin Send 
+              }
+              setFlag(CMD_SUCCESS_FLAG);
+            }  //  end  else if(commBfr[0]==LAMP_CMD_PREFIX)
+                  //////////////////////////////////////////////////////
+                  // SERVICE DIRECT IO COMMAND
+                  //  Examples: !S11   ;Sets Digital Output 11 =  1
+                  //    !C12    ;Clears Digital Output 12 ->Sets=0
+                  //    !G4     ;GET current value of input 4
+                  //////////////////////////////////////////////////////
+            else if(commBfr[0]==IO_CMD_PREFIX)    // MSG Started with '!' which is CMD Prefix
+            {
+              bytV = 1;                       // use bytV as Parse Index
+              newCh = commBfr[bytV++];        // mov past first letter of CMD
+                  // TRANSLATE CMD {GET, SET, CLR}
+              if(newCh== 'S') cmdCode = SET_CMD;
+              else if(newCh=='C') cmdCode = CLR_CMD;
+              else if(newCh=='G' || newCh=='R') cmdCode = GET_CMD; 
+                  // mov past CMD letters to start of ioRef Numeric Fld
+              for( ;bytV < COMMBFR_SIZ && commBfr[bytV] > '9' || commBfr[bytV] < '0'; bytV++);
+                  // Convert ioRef into numeric value after CMD
+              newCh = commBfr[bytV++];         // Convert ioRef from ASCII to Numeric
+              ioRefCh[0] = newCh;     ioRefCh[1] = 0;
+              if(newCh>='0' && newCh<='9')
+              {
+                ioRef = newCh - '0';
+                newCh = commBfr[bytV++];      // may be 2 digit IO Number
+                if(newCh>='0' && newCh<='9')  // 2nd digita was provided
+                {
+                  ioRefCh[1] = newCh;
+                  ioRef *= 10;
+                  ioRef += (newCh - '0');
+                }
+              }
+                  //////////////////////////////////////////////////////
+                  // PERFORM DIRECT IO ACTION ->GEN REPLY MSG
+                  //////////////////////////////////////////////////////
+              if(ioRef>=FIRST_DIG_IO && ioRef<=LAST_DIG_IO && ioRef != COMM_PIN)
+              { bytV = 9;
+                if(cmdCode==SET_CMD || cmdCode==CLR_CMD)
+                {
+                  pinMode(ioRef, OUTPUT); 
+                  bytV = (cmdCode==SET_CMD) ? 1:0;
+                  digitalWrite(ioRef, bytV);
+                } 
+                else if(cmdCode==GET_CMD)
+                {
+                  pinMode(ioRef, INPUT_PULLUP);
+                  bytV = digitalRead(ioRef);
+                }
+                if(bytV<=1)
+                {
+                  commBfr[commBfrLen++] = '[';  
+                  commBfr[commBfrLen++] = ioRefCh[0]; 
+                  if(ioRefCh[1]>='0')
+                    commBfr[commBfrLen++] = ioRefCh[1]; 
+                  commBfr[commBfrLen++] = ']'; 
+                  commBfr[commBfrLen++] = '='; 
+                  commBfr[commBfrLen++] = '0' + bytV;
+                  commBfr[commBfrLen] = 0;          // Terminate Msg            
+                  commState = 100;                  // Begin Send 
+                  setFlag(CMD_SUCCESS_FLAG);
+                }
+              }
+              else if(ioRef >= ANALOG_INPUT_OFFSET && ioRef<(NUM_AI + ANALOG_INPUT_OFFSET))
+              {
+                ioRef -= ANALOG_INPUT_OFFSET;
+                commBfr[commBfrLen++] = '['; 
+                commBfr[commBfrLen++] = ioRefCh[0]; 
+                if(ioRefCh[1]>='0')
+                  commBfr[commBfrLen++] = ioRefCh[1]; 
+                commBfr[commBfrLen++] = ']'; 
+                commBfr[commBfrLen++] = '=';  
+                intVal = analogRead(ioRef);
+                itoa(intVal);
+                commBfr[commBfrLen] = 0;          // Terminate Msg            
+                commState = 100;                  // Begin Send 
+                setFlag(CMD_SUCCESS_FLAG + ANALOG_RD_FLAG);
+              } 
+            } // end if(commBfr[0]==IO_CMD_PREFIX)
+                  //////////////////////////////////////////////////////
+                  //  PROCESS TEST REQUEST format:    Tn    where n is TestNum -assume point to point, not networked
+                  //////////////////////////////////////////////////////
+            else if(commBfr[0]==TEST_REQUEST_PREFIX)
+            {
+              for(xx=1; xx<commNdx && commBfr[xx]==' ' ; xx++);   // move to start of nxt fld 
+              intVal = 0;
+              bytV = 0;                                           // bytV = Negative Flag
+              if(commBfr[xx]=='-')
+              {
+                ++bytV;
+                ++xx;
+              }
+              for( ;xx<commNdx && isDigit(commBfr[xx]) ;xx++)     // Convert int value rcvd
+              {
+                if(intVal) intVal *= 10;
+                intVal += commBfr[xx]  -'0';
+              }
+                  // HAVE intVal ->RECREATE IT in Reply
+              commBfrLen = 0; 
+              itoa(intVal); 
+              commBfr[commBfrLen] = 0;          // Terminate Msg            
+              commState = 100;                  // Begin Send 
+              setFlag(CMD_SUCCESS_FLAG);
+            }  //  end  else if(commBfr[0]==LAMP_CMD_PREFIX)
+            
+            commNdx = 0;                          // Drain Rcvd Msg
+            if(commState != 100)                  // Reset commState if not going to Send (commState=100)
+              commState = 0;
+          } // end  if(bitTime >= nxtSample)            // TIMEOUT:  so this is END OF MSG
+        } //  end  else if(commNdx)                // NO START RCVD for Next Byte ->Check for TIMEOUT
+        break;
+
+      case 3:                 // WAITING FOR NEXT (of 7) DATA BIT  
+        if(bitTime >= nxtSample)        // Time to Sample
+        { 
+          if(!digitalRead(COMM_PIN)) newCh |= bitMask;        // If Input==ACTV Then Set this bit in newCh
+          bitMask >>= 1;                    // RT Shift bitMask for next bit
+          if(++bitCnt > 7)
+            commState = 4;
+          bitTime = 0;  nxtSample = BIT_FRAME_TIME;   // ReSet Time vars for next bit sample time - move 1 bit frame time
+        }
+        break;
+
+      case 4:                 // WAITING FOR STOP  (bitCnt >= 8 now)
+        if(bitTime >= nxtSample)        // Time to Sample
+        { 
+          if(digitalRead(COMM_PIN))                       // Rcvd STOP
+          {                                   // Finished Rcving this byte
+            if(commNdx < COMMBFR_SIZ)
+            {
+              commBfr[commNdx++] = newCh;     // append newCh to msg
+              commBfr[commNdx] = 0;           // terminate msg string 
+            }
+            commState = 2;                    // Goto Next Byte 
+            bitTime = 0;                      // reset bitTime - will use to test End Of Msg Timeout
+            nxtSample = NXT_BYTE_TIMEOUT;     // Set to Timeout period  (waiting for Nxt Msg Byte)
+          }
+        }
+        break;
+                    ////////////////////////////////////////////////////////////////////////
+                    //  SEND MSG ON SAME PIN
+                    ////////////////////////////////////////////////////////////////////////
+      case 100:                 // SETUP TO SEND REPLY MSG
+        pinMode(COMM_PIN, OUTPUT);  digitalWrite(COMM_PIN, HIGH);   // Set COMM_PIN as OUTPUT & Set HIGH == STOP
+        ++commState;
+        break;
+
+      case 101:                 // WAITING TO BEGIN SEND WHEN MSG is Loaded 
+        if(commBfrLen)
+        { 
+          ++commState; 
+          commNdx = 0;
+        }
+        break;
+
+      case 102:                 // START SEND OF NEXT BYTE
+        if(commNdx < commBfrLen)
+        {
+          digitalWrite(COMM_PIN, LOW);                              // SET START BIT Actv
+          bitTime = 0;  nxtSample = BIT_FRAME_TIME;
+          bitMask = 0x40;   newCh = commBfr[commNdx++];
+          bitCnt = 0;
+          ++commState; 
+        }
+        else            // Msg Complete
+        {
+              // PRINT(F("SENT>")); PRINTLN((char *)commBfr);   
+          commBfrLen = 0;               // Drain Bfr 
+          commState = 0;                // Reset in RCV_MODE
+        }
+        break;
+
+      case 103:                         // SENDING DATA BITS
+        if(bitTime >= nxtSample)        // TIME TO SET NEXT BIT
+        {
+          ++bitCnt;
+          bytV = 1;
+          if(bitCnt <= 7)             // Sending Data Bit
+          {
+            bytV = (newCh & bitMask) ? 0:1;    // Data bit==1 is Set LOW ACTV
+            bitMask >>= 1;              // RT Shift bit mask for next bit
+          }
+          else                        // STOP_BIT  == 1
+          { 
+            if(bitCnt >= 9)           // Done go back to Start Nxt Byte state 
+              --commState; 
+          }
+          digitalWrite(COMM_PIN, bytV);
+          bitTime = 0;  nxtSample = BIT_FRAME_TIME;
+        }
+        break;
+
+      default:
+        commState = 0;
+        break; 
+    }
+  } // end NEW ms
+}
+
+/**************************************************************
+ * getLampAddr()  -Reads Pins 5,6 ->HI==1.  Rtns Address (0,1,2)
+ **************************************************************/
+byte getLampAddr()
+{ byte addr=0;
+  pinMode(LAMP_ADDR_PIN1, INPUT);   pinMode(LAMP_ADDR_PIN2, INPUT);
+  if(digitalRead(LAMP_ADDR_PIN1)) addr = 1;
+  if(digitalRead(LAMP_ADDR_PIN2)) addr = 2;
+  return addr;
+}
+/**************************************************************
+ *  itoa()    -simple version of sprintf with smaller footprint to print raw AI value
+ **************************************************************/
+void itoa(int v)
+{
+  byte digCnt=0, inFld=0; int factor, tmpV;
+  for(factor=1000; digCnt<4 && factor >= 1 ;digCnt++)
+  {
+    if(v >= factor)
+    {
+      tmpV = v / factor;
+      commBfr[commBfrLen++] = (byte)('0' + tmpV);
+      v -= tmpV * factor;
+      ++inFld;                // INCR inFld to cause Padding of number
+    }
+    else                      // Value for this digit = 0
+    { 
+      if(inFld || factor==1) commBfr[commBfrLen++] = '0';
+    }
+    if(factor>=10) factor /= 10; else factor = 0;   // END OF LOOP, Divide by 10
+  }
+}
