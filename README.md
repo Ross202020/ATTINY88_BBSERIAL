@@ -38,6 +38,7 @@ Reply indicates value for GET, SET, CLR.  Examples Cmd>!G9    Reply>[9]=1
 
 CONNECTIONS:
 VIN is from Power Supply (5.5 VDC),   GND = GND,  Pin(3) is communication Pin – use 220 Ohm at each station on the One Wire Network to limit the drive current on network with multiple nodes.
+
 /*************************************************************************************************************
  *  ATTINY_TEST       
  *    To make this work:
